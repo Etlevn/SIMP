@@ -1,0 +1,56 @@
+# Dotfiles / local tooling
+.*
+!.gitignore
+!.env.template
+!**/.gitkeep
+
+# Local reference tree (full prior clone)
+_*/
+
+# Private notes
+/notes/
+
+# Research notebooks — ignored for now; un-ignore when committing the team remote
+BMLL_Stage1_2_Corporate_Actions_WRDS_Bloomberg.ipynb
+BMLL_Stage3_Daily_Fund_Research.ipynb
+
+# Python / tooling
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+dist/
+build/
+.venv/
+.pytest_cache/
+
+# Credentials and secrets
+.env
+.env.*
+!.env.template
+credentials.json
+secrets.json
+*.pem
+*.key
+pgpass*
+.pgpass
+
+# Licensed / generated market data
+data/cache/**
+!data/cache/.gitkeep
+data/raw/**
+!data/raw/.gitkeep
+data/review/**
+!data/review/.gitkeep
+data/external/**
+!data/external/.gitkeep
+
+# Ledger outputs
+output/data/**
+!output/data/.gitkeep
+
+# Large binary caches
+*.parquet
+*.pkl
+*.pickle
+*.h5
+*.feather

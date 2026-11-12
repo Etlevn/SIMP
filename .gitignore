@@ -36,10 +36,8 @@ pgpass*
 !/data/**/
 !/data/**/.gitkeep
 
-# Stage outputs (keep directory placeholders)
-/output/**
-!/output/**/
-!/output/**/.gitkeep
+# Stage outputs (entire tree local-only; including empty dirs)
+/output/
 
 # Large binary caches
 *.parquet

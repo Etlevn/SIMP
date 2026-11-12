@@ -2,7 +2,7 @@
 
 Schemas for the flat local inputs under `data/` and the Stage 2 fund outputs under `output/2_fund/`. Permanent security ID `permno` is the primary join key across tables.
 
-**Publishing note:** contents of `data/` (except placeholders such as `.gitkeep`) and `output/` stage folders are **gitignored**. Do not commit licensed extracts or generated ledgers.
+**Publishing note:** contents of `data/` (except placeholders such as `.gitkeep`) are **gitignored**. The entire `output/` tree is gitignored (including empty folders). Do not commit licensed extracts or generated ledgers.
 
 For product intent and how to run the pipeline, see the root [`README.md`](../README.md).
 

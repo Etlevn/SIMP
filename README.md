@@ -72,7 +72,7 @@ SIMP/
 │   ├── run_1_data.py       # Stage 1: validate / fetch
 │   └── run_2_fund.py       # Stage 2: daybook
 ├── data/                   # Flat inputs (contents gitignored)
-└── output/2_fund/          # Stage 2 outputs (gitignored; placeholder kept)
+└── output/2_fund/          # Stage 2 outputs (gitignored entirely)
 ```
 
 Edit **`config.py`** for dates, AUM, cash buffer, fees, and `FLOW_*` parameters. Keep experiment knobs out of `src/`.

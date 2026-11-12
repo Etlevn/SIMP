@@ -3,16 +3,13 @@
 !.gitignore
 !.env.template
 !**/.gitkeep
+*.egg-info/
 
 # Local reference tree (full prior clone)
 _*/
 
 # Private notes
 /notes/
-
-# Research notebooks — ignored for now; un-ignore when committing the team remote
-BMLL_Stage1_2_Corporate_Actions_WRDS_Bloomberg.ipynb
-BMLL_Stage3_Daily_Fund_Research.ipynb
 
 # Python / tooling
 __pycache__/
@@ -34,19 +31,15 @@ secrets.json
 pgpass*
 .pgpass
 
-# Licensed / generated market data
-data/cache/**
-!data/cache/.gitkeep
-data/raw/**
-!data/raw/.gitkeep
-data/review/**
-!data/review/.gitkeep
-data/external/**
-!data/external/.gitkeep
+# Licensed / generated market data (keep directory placeholders only)
+/data/**
+!/data/**/
+!/data/**/.gitkeep
 
-# Ledger outputs
-output/data/**
-!output/data/.gitkeep
+# Stage outputs (keep directory placeholders)
+/output/**
+!/output/**/
+!/output/**/.gitkeep
 
 # Large binary caches
 *.parquet

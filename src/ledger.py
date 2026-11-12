@@ -9,12 +9,9 @@ def _dates(values):
     return pd.DatetimeIndex(pd.to_datetime(values)).normalize()
 
 
-def prepare_exclusion_scenario(weights, events, approval_audit, *, exclude_reverse_splits=True):
-    """Construct an explicitly restricted portfolio, not a full-index backtest."""
+def prepare_exclusion_scenario(weights, events, *, exclude_reverse_splits=True):
+    """Drop reverse-split names (no cash-in-lieu) and renormalize snapshot weights."""
     reasons = {}
-    for row in approval_audit.loc[approval_audit.decision.eq("EXCLUDE")].itertuples():
-        if pd.notna(row.permno):
-            reasons.setdefault(int(row.permno), set()).add("excluded_corporate_action")
     if exclude_reverse_splits and not events.empty:
         reverse = events.event_type.eq("STOCK_SPLIT") & pd.to_numeric(events.split_ratio).lt(1)
         for p in events.loc[reverse, "permno"]:
@@ -39,6 +36,107 @@ def prepare_exclusion_scenario(weights, events, approval_audit, *, exclude_rever
         kept["cap_weight_proxy_pct"] = kept.cap_weight_proxy * 100
     filtered_events = events.loc[~events.permno.isin(reasons)].copy()
     return kept, filtered_events, removed
+
+
+def temporal_price_exclusions(weights, prices, calendar, schedule=None):
+    """Drop snapshot rows whose active holding window has bad closes.
+
+    Holding window for snapshot ``t``: decision day through the fill session after
+    the next snapshot (or calendar end). Invalid / missing / nonpositive closes in
+    that window, or non-``TR`` closes on decision/execution key days, remove only
+    that ``(date, permno)`` weight row. Remaining weights are renormalized.
+
+    When ``schedule`` is provided (``rebalance_schedule`` output with
+    ``snapshot_date`` / ``decision_date`` / ``execution_date``), use those key
+    days instead of the Stage-2 next-session defaults.
+    """
+    w = weights.copy()
+    w["date"] = pd.to_datetime(w["date"]).dt.normalize()
+    px = prices.copy()
+    px["date"] = pd.to_datetime(px["date"]).dt.normalize()
+    if px[["date", "permno"]].duplicated().any():
+        raise ValueError("Duplicate price key")
+    if isinstance(calendar, pd.DataFrame):
+        cal_values = calendar["date"] if "date" in calendar.columns else calendar.iloc[:, 0]
+    else:
+        cal_values = calendar
+    cal = pd.DatetimeIndex(pd.to_datetime(cal_values)).normalize().sort_values().unique()
+    snaps = sorted(w.date.unique())
+    if not all(d in cal for d in snaps):
+        raise ValueError("Snapshot without trading day")
+    by_price = {int(pid): frame.set_index("date") for pid, frame in px.groupby("permno")}
+    if schedule is None:
+        decide = {d: d for d in snaps}
+        execute = {d: cal[min(cal.get_loc(d) + 1, len(cal) - 1)] for d in snaps}
+    else:
+        sched = schedule.copy()
+        for col in ("snapshot_date", "decision_date", "execution_date"):
+            if col not in sched.columns:
+                raise ValueError(f"schedule missing {col}")
+            sched[col] = pd.to_datetime(sched[col]).dt.normalize()
+        if sched.snapshot_date.duplicated().any():
+            raise ValueError("schedule has duplicate snapshot_date")
+        decide = dict(zip(sched.snapshot_date, sched.decision_date))
+        execute = dict(zip(sched.snapshot_date, sched.execution_date))
+        missing = [d for d in snaps if d not in decide or d not in execute]
+        if missing:
+            raise ValueError("schedule missing snapshot rows")
+        for d in snaps:
+            for key_day in (decide[d], execute[d]):
+                if pd.isna(key_day) or key_day not in cal:
+                    raise ValueError(
+                        f"schedule key day for snapshot {d.date()} is outside the calendar; "
+                        "extend calendar/prices before the first reference date")
+    exclusions = []
+    for j, d in enumerate(snaps):
+        left = cal.get_loc(decide[d])
+        right = cal.get_loc(execute[snaps[j + 1]]) if j < len(snaps) - 1 else len(cal) - 1
+        required = cal[left:right + 1]
+        effective_start = execute[d]
+        for row in w.loc[w.date.eq(d)].itertuples(index=False):
+            pid = int(row.permno)
+            problems = []
+            quotes = by_price.get(pid)
+            if quotes is None:
+                problems.append("missing_price_series")
+            else:
+                part = quotes.reindex(required)
+                val = pd.to_numeric(part["close_price"], errors="coerce")
+                if val.isna().any() or (~np.isfinite(val)).any() or val.le(0).any():
+                    problems.append("missing_or_invalid_active_interval_close")
+                if "price_flag" in part.columns:
+                    test_dates = [decide[d], effective_start]
+                    if j < len(snaps) - 1:
+                        test_dates.extend([decide[snaps[j + 1]], required[-1]])
+                    flags = part.loc[list(dict.fromkeys(test_dates)), "price_flag"]
+                    if flags.astype(str).str.upper().ne("TR").any():
+                        problems.append("nontradeable_snapshot_or_execution_close")
+            if problems:
+                exclusions.append({
+                    "date": d,
+                    "permno": pid,
+                    "exclusion_reason": ";".join(sorted(set(problems))),
+                })
+    cut_keys = pd.DataFrame(exclusions, columns=["date", "permno", "exclusion_reason"])
+    if cut_keys.empty:
+        cut = pd.DataFrame(columns=["date", "permno", "exclusion_reason"])
+        kept = w.copy()
+    else:
+        cut = w.merge(cut_keys, on=["date", "permno"], how="inner", validate="one_to_one")
+        kept = w.merge(
+            cut_keys[["date", "permno"]], on=["date", "permno"], how="left", indicator=True)
+        kept = kept.loc[kept["_merge"].eq("left_only")].drop(columns=["_merge"])
+    if set(kept.date) != set(w.date):
+        raise ValueError("Exclusions removed an entire snapshot")
+    totals = kept.groupby("date").cap_weight_proxy.transform("sum")
+    if (totals <= 0).any():
+        raise ValueError("No positive investable weights remain")
+    if "original_cap_weight_proxy" not in kept.columns:
+        kept["original_cap_weight_proxy"] = kept.cap_weight_proxy
+    kept["cap_weight_proxy"] = kept.cap_weight_proxy / totals
+    if "cap_weight_proxy_pct" in kept.columns:
+        kept["cap_weight_proxy_pct"] = kept.cap_weight_proxy * 100
+    return kept, cut
 
 
 def simulate(weights, prices, calendar, events, start, end, *, initial_cash=10e9,
@@ -74,8 +172,6 @@ def simulate(weights, prices, calendar, events, start, end, *, initial_cash=10e9
             raise ValueError("Missing/duplicate action identity or date")
         if not e.event_type.isin(["CASH_DIVIDEND", "STOCK_SPLIT"]).all():
             raise ValueError("Unsupported corporate action")
-        if "requires_review" not in e or not e.requires_review.eq(False).all():
-            raise ValueError("Unreviewed action")
         cash_events = e.event_type.eq("CASH_DIVIDEND")
         if not e.loc[cash_events, "currency"].astype(str).str.upper().eq("USD").all():
             raise ValueError("Unverified/non-USD currency")

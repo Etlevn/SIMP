@@ -1,10 +1,10 @@
-"""Offline auto-review of PENDING event/scope decisions.
+"""LEGACY: offline auto-review of PENDING event/scope decisions.
+
+Not used by the flat ``data/`` main path (``data_loader.py``). Kept for reference
+against older multi-table ``data/cache`` + ``data/review`` layouts.
 
 Generic rules apply to any cache window from ``coverage.json``. Issuer-specific
 evidence matches the March–June 2026 checked set (same rules as _SIM stage2).
-
-Only updates ``event_decisions.csv`` and ``scope_decisions.csv``. Does not create
-backups or rewrite other files under ``data/review/``.
 """
 
 from __future__ import annotations

@@ -11,6 +11,9 @@ _*/
 # Private notes
 /notes/
 
+# Delivery-only market-tape plugin (never push to public origin)
+/vendor_tape/
+
 # Local agent plans / specs
 /docs/superpowers/
 

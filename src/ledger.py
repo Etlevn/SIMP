@@ -139,15 +139,27 @@ def temporal_price_exclusions(weights, prices, calendar, schedule=None):
     return kept, cut
 
 
+DIVIDEND_MODES = frozenset({"accrual", "cash_at_ex", "no_cash_div"})
+
+
 def simulate(weights, prices, calendar, events, start, end, *, initial_cash=10e9,
-             cash_buffer_bps=10, fee_bps=0, flows=None, rebalance_on_flow=False):
-    """All-cash inception, close decisions and next-session close proxy fills."""
+             cash_buffer_bps=10, fee_bps=0, flows=None, rebalance_on_flow=False,
+             dividend_mode: str = "accrual"):
+    """All-cash inception, close decisions and next-session close proxy fills.
+
+    ``dividend_mode`` mirrors ``fund_simulator.simulate_fund``:
+    ``accrual`` / ``cash_at_ex`` / ``no_cash_div``.
+    """
     start, end = pd.Timestamp(start).normalize(), pd.Timestamp(end).normalize()
     if start > end or not np.isfinite(initial_cash) or initial_cash <= 0:
         raise ValueError("Invalid dates/initial cash")
     if not 0 <= cash_buffer_bps < 10000 or not 0 <= fee_bps < 10000:
         raise ValueError("Invalid cash buffer/fee")
+    if dividend_mode not in DIVIDEND_MODES:
+        raise ValueError(f"dividend_mode must be one of {sorted(DIVIDEND_MODES)}")
     w, q, e = weights.copy(), prices.copy(), events.copy()
+    if dividend_mode == "no_cash_div" and not e.empty:
+        e = e[e.event_type.ne("CASH_DIVIDEND")].copy()
     w["date"], q["date"] = _dates(w.date), _dates(q.date)
     for frame in (w, q):
         if frame[["date", "permno"]].duplicated().any():
@@ -229,12 +241,36 @@ def simulate(weights, prices, calendar, events, start, end, *, initial_cash=10e9
                                 "permno": p, "share_change": updated - n, "accrued": 0., "paid": 0.})
             else:
                 amount = float(r.cash_per_share)
-                if not np.isfinite(amount) or amount < 0 or pd.isna(r.pay_date) or r.pay_date < day:
+                if not np.isfinite(amount) or amount < 0:
                     raise ValueError("Invalid dividend amount/payment date")
-                if n:
-                    receivables[r.source_event_id] = (r.pay_date, n * amount, p)
-                    actions.append({"date": day, "source_event_id": r.source_event_id,
-                                    "permno": p, "share_change": 0, "accrued": n * amount, "paid": 0.})
+                if dividend_mode == "cash_at_ex":
+                    if n:
+                        cash += n * amount
+                        actions.append(
+                            {
+                                "date": day,
+                                "source_event_id": r.source_event_id,
+                                "permno": p,
+                                "share_change": 0,
+                                "accrued": 0.0,
+                                "paid": n * amount,
+                            }
+                        )
+                else:
+                    if pd.isna(r.pay_date) or r.pay_date < day:
+                        raise ValueError("Invalid dividend amount/payment date")
+                    if n:
+                        receivables[r.source_event_id] = (r.pay_date, n * amount, p)
+                        actions.append(
+                            {
+                                "date": day,
+                                "source_event_id": r.source_event_id,
+                                "permno": p,
+                                "share_change": 0,
+                                "accrued": n * amount,
+                                "paid": 0.0,
+                            }
+                        )
         for event_id, (payday, amount, p) in list(receivables.items()):
             if payday == day:
                 cash += amount

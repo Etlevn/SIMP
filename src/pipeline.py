@@ -66,6 +66,7 @@ class PipelineConfig:
     flow_max_redemption_bps: float = 500.0
     flow_band_bps: float = 25.0
     write_extra: bool = False  # PHASE2_WRITE_EXTRA — audit / secondary CSVs
+    dividend_sensitivity: bool = False  # DIVIDEND_SENSITIVITY — contrast table
 
     @classmethod
     def from_user_config(cls, user_config: ModuleType | Any) -> "PipelineConfig":
@@ -88,6 +89,9 @@ class PipelineConfig:
             flow_max_redemption_bps=float(getattr(user_config, "FLOW_MAX_REDEMPTION_BPS", 500.0)),
             flow_band_bps=float(getattr(user_config, "FLOW_BAND_BPS", 25.0)),
             write_extra=bool(getattr(user_config, "PHASE2_WRITE_EXTRA", False)),
+            dividend_sensitivity=bool(
+                getattr(user_config, "DIVIDEND_SENSITIVITY", False)
+            ),
         )
 
     @classmethod
@@ -452,6 +456,93 @@ def run_ledger(cfg: PipelineConfig | None = None) -> dict:
     }
 
 
+def _dividend_sensitivity_metrics(
+    results: dict,
+    *,
+    mode: str,
+    bench: pd.DataFrame,
+    fund_start: pd.Timestamp,
+    fund_end: pd.Timestamp,
+) -> dict:
+    """Scalar NAV / TD / TE row for one dividend mode (no disk write)."""
+    nav = results["daily_nav"]
+    last = nav.iloc[-1]
+    _, summary, _ = performance_report(
+        nav, bench, evaluation_start=fund_start, evaluation_end=fund_end
+    )
+    return {
+        "mode": mode,
+        "ending_nav": float(last.nav),
+        "ending_cash": float(last.cash),
+        "ending_receivables": float(last.receivables),
+        "tracking_difference_annualized_bps": float(
+            summary["tracking_difference_annualized_bps"]
+        ),
+        "tracking_error_annualized_bps": float(
+            summary["tracking_error_annualized_bps"]
+        ),
+    }
+
+
+def _dividend_sensitivity_table(
+    *,
+    baseline_results: dict,
+    replay_snapshots: pd.DataFrame,
+    prices: pd.DataFrame,
+    calendar,
+    replay_events: pd.DataFrame,
+    fund_start: pd.Timestamp,
+    fund_end: pd.Timestamp,
+    flows: pd.DataFrame,
+    cfg: PipelineConfig,
+    bench: pd.DataFrame,
+) -> pd.DataFrame:
+    """Baseline accrual vs cash_at_ex vs no_cash_div (deltas vs accrual)."""
+    base = _dividend_sensitivity_metrics(
+        baseline_results,
+        mode="accrual",
+        bench=bench,
+        fund_start=fund_start,
+        fund_end=fund_end,
+    )
+    rows = [base]
+    for mode in ("cash_at_ex", "no_cash_div"):
+        alt = simulate_fund(
+            replay_snapshots,
+            prices,
+            calendar,
+            replay_events,
+            fund_start,
+            fund_end,
+            initial_cash=cfg.initial_cash,
+            cash_buffer_bps=cfg.cash_buffer_bps,
+            fee_bps=cfg.fee_bps,
+            flows=flows,
+            flow_band_bps=cfg.flow_band_bps,
+            dividend_mode=mode,
+        )
+        rows.append(
+            _dividend_sensitivity_metrics(
+                alt,
+                mode=mode,
+                bench=bench,
+                fund_start=fund_start,
+                fund_end=fund_end,
+            )
+        )
+    out = pd.DataFrame(rows)
+    out["delta_ending_nav"] = out["ending_nav"] - float(base["ending_nav"])
+    out["delta_td_bps"] = (
+        out["tracking_difference_annualized_bps"]
+        - float(base["tracking_difference_annualized_bps"])
+    )
+    out["delta_te_bps"] = (
+        out["tracking_error_annualized_bps"]
+        - float(base["tracking_error_annualized_bps"])
+    )
+    return out
+
+
 def run_fund(cfg: PipelineConfig | None = None) -> dict:
     """Stage 2 fund: reference-close + synthetic flows → ``output/2_fund/``."""
     cfg = cfg or PipelineConfig.load()
@@ -490,7 +581,8 @@ def run_fund(cfg: PipelineConfig | None = None) -> dict:
     results = simulate_fund(
         replay_snapshots, prices, calendar, replay_events, fund_start, fund_end,
         initial_cash=cfg.initial_cash, cash_buffer_bps=cfg.cash_buffer_bps,
-        fee_bps=cfg.fee_bps, flows=flows, flow_band_bps=cfg.flow_band_bps)
+        fee_bps=cfg.fee_bps, flows=flows, flow_band_bps=cfg.flow_band_bps,
+        dividend_mode="accrual")
 
     excluded_rows, excluded_permnos, reason_counts = _exclusion_summary(cut_parts)
     flow_nonzero = int(flows["flow_bps"].ne(0).sum()) if len(flows) else 0
@@ -511,6 +603,30 @@ def run_fund(cfg: PipelineConfig | None = None) -> dict:
     )
     manifest = written["manifest"]
     manifest["approved_events"] = len(replay_events)
+    manifest["dividend_sensitivity"] = bool(cfg.dividend_sensitivity)
+
+    sens = None
+    if cfg.dividend_sensitivity:
+        try:
+            bench = load_benchmark(DATA_DIR)
+        except Exception as exc:
+            raise ValueError(
+                f"Dividend sensitivity requires S&P 500 TR ({type(exc).__name__}: {exc})."
+            ) from exc
+        sens = _dividend_sensitivity_table(
+            baseline_results=results,
+            replay_snapshots=replay_snapshots,
+            prices=prices,
+            calendar=calendar,
+            replay_events=replay_events,
+            fund_start=fund_start,
+            fund_end=fund_end,
+            flows=flows,
+            cfg=cfg,
+            bench=bench,
+        )
+        sens.to_csv(OUTPUT_DIR / "dividend_sensitivity.csv", index=False)
+
     if cfg.write_extra:
         (OUTPUT_DIR / RUN_MANIFEST_JSON).write_text(
             json.dumps(manifest, indent=2, default=str) + "\n"
@@ -531,6 +647,8 @@ def run_fund(cfg: PipelineConfig | None = None) -> dict:
         "pm_orders": int(len(written["pm_orders"])),
         "order_notional_usd": float(manifest.get("order_notional_usd") or 0.0),
         "write_extra": bool(cfg.write_extra),
+        "dividend_sensitivity": bool(cfg.dividend_sensitivity),
+        "dividend_sensitivity_table": sens,
         "schedule": results["schedule"],
         "tracking_difference_annualized_bps": summary[
             "tracking_difference_annualized_bps"

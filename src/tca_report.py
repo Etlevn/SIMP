@@ -20,6 +20,16 @@ COST_COLS = [
     "vs_vwap_bps",
     "fees_bps",
 ]
+# Fixed pct_adv bins (share of ADV): <1%, 1–5%, 5–10%, ≥10%
+PCT_ADV_EDGES = (0.01, 0.05, 0.10)
+PCT_ADV_LABELS = ("lt_1pct", "1_5pct", "5_10pct", "ge_10pct")
+
+
+def pct_adv_bucket(pct_adv: pd.Series) -> pd.Series:
+    """Map size/ADV into fixed liquidity labels."""
+    x = pd.to_numeric(pct_adv, errors="coerce")
+    bins = [-np.inf, *PCT_ADV_EDGES, np.inf]
+    return pd.cut(x, bins=bins, labels=PCT_ADV_LABELS, right=False)
 
 
 def order_tca(
@@ -98,14 +108,27 @@ def strategy_summary(order_rows: pd.DataFrame) -> pd.DataFrame:
     """Notional-weighted means of cost columns per strategy."""
     if order_rows is None or order_rows.empty:
         return pd.DataFrame(
-            columns=["strategy", "orders", "notional_usd", *COST_COLS, "cost_vs_close_usd"]
+            columns=[
+                "strategy",
+                "orders",
+                "n_trade_dates",
+                "notional_usd",
+                *COST_COLS,
+                "cost_vs_close_usd",
+            ]
         )
 
     def agg(g: pd.DataFrame) -> pd.Series:
         w = g["notional_usd"]
         out = {c: float(np.average(g[c], weights=w)) for c in COST_COLS}
+        n_dates = (
+            int(pd.to_datetime(g["trade_date"]).dt.normalize().nunique())
+            if "trade_date" in g.columns
+            else 0
+        )
         out.update(
             orders=int(len(g)),
+            n_trade_dates=n_dates,
             notional_usd=float(w.sum()),
             cost_vs_close_usd=float(g.cost_vs_close_usd.sum()),
             fees_usd=float(g.fees_usd.sum()),
@@ -119,11 +142,45 @@ def strategy_summary(order_rows: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def liquidity_bucket_summary(order_rows: pd.DataFrame) -> pd.DataFrame:
+    """Notional-weighted costs by strategy × pct_adv bucket."""
+    cols = [
+        "strategy",
+        "pct_adv_bucket",
+        "orders",
+        "notional_usd",
+        *COST_COLS,
+        "cost_vs_close_usd",
+    ]
+    if order_rows is None or order_rows.empty:
+        return pd.DataFrame(columns=cols)
+    x = order_rows.copy()
+    x["pct_adv_bucket"] = pct_adv_bucket(x["pct_adv"]).astype(str)
+
+    def agg(g: pd.DataFrame) -> pd.Series:
+        w = g["notional_usd"]
+        out = {c: float(np.average(g[c], weights=w)) for c in COST_COLS}
+        out.update(
+            orders=int(len(g)),
+            notional_usd=float(w.sum()),
+            cost_vs_close_usd=float(g.cost_vs_close_usd.sum()),
+        )
+        return pd.Series(out)
+
+    return (
+        x.groupby(["strategy", "pct_adv_bucket"], sort=False)
+        .apply(agg, include_groups=False)
+        .reset_index()
+    )
+
+
 def run_strategies(
     pm: pd.DataFrame,
     stock_days: pd.DataFrame,
     strategies: tuple[str, ...] = STRATEGIES,
     model: ImpactModel | None = None,
+    venue_days: pd.DataFrame | None = None,
+    tape_source: str = "synthetic_offline",
     **desk_kw,
 ) -> dict:
     """Generate desk → fills → order TCA for each strategy on the same PM set."""
@@ -132,10 +189,13 @@ def run_strategies(
     out: dict = {}
     rows = []
     for strat in strategies:
-        trader, broker = generate_desk(pm, stock_days, strat, **desk_kw)
+        trader, broker = generate_desk(
+            pm, stock_days, strat, venue_days=venue_days, **desk_kw
+        )
         fills = simulate_fills(trader, broker, stock_days, model)
         validate_links(pm, trader, broker, fills)
         orders = order_tca(pm, trader, fills, stock_days, strat)
+        orders["tape_source"] = tape_source
         out[strat] = {
             "trader": trader,
             "broker": broker,
@@ -146,5 +206,6 @@ def run_strategies(
     all_orders = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
     out["order_tca"] = all_orders
     out["strategy_summary"] = strategy_summary(all_orders)
+    out["liquidity_buckets"] = liquidity_bucket_summary(all_orders)
     out["model"] = model.as_dict()
     return out

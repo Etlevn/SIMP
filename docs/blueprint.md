@@ -56,7 +56,7 @@ Recommended **delivery order** (schema and generator before scaling TCA):
 Phase 0 Schema  →  Phase 1 Generator  →  Phase 2 Fund (finish + PM handoff)  →  Phase 3 TCA
 ```
 
-**Reality in this repo today:** Phase 0 schema, Phase 2 fund, and Phase 3 one-date synthetic TCA are implemented; Phase 1 is a stub. Next: Phase 3 all-rebalance scale and/or Phase 1 generator; calibrate impact before quoting.
+**Reality in this repo today:** Phases 0, 1 (synthetic), 2 (incl. optional dividend sensitivity), and 3a/3b (one-date or all-rebalance synthetic TCA) are implemented. Next: impact calibration and delivery export for the org remote.
 
 Optional side track (not a numbered phase): flow toxicity / adverse selection—separate interface only.
 
@@ -106,9 +106,9 @@ reference data (WRDS, …)
 
 `main_0_schema.py` writes the four example chain tables under `output/0_schema/` by default; extras (`PHASE0_WRITE_EXTRA`) add field dictionary / conservation / validation artifacts. Contract: `src/order_schema.py` + [`docs/order_schema.md`](order_schema.md). Phase 2 emits the same PM columns in `pm_orders.csv` (core handoff; audit extras via `PHASE2_WRITE_EXTRA`).
 
-### Phase 1 — Generator *(stub entrypoint)*
+### Phase 1 — Generator *(implemented — synthetic tape)*
 
-`main_1_generator.py` writes `output/1_generator/STATUS.txt`. No multi-MIC synthetic generator yet.
+`main_1_generator.py` emits a Phase 0–valid PM→Trader→Broker→Fill chain under `output/1_generator/` using `MarketTape` (`src/market_tape.py` + `src/order_generator.py`). Default `TAPE_MODE=synthetic` (enhanced offline tape with `venue_days`). `TAPE_MODE=plugin` loads gitignored `SIMP_TAPE_PLUGIN_DIR/tape_plugin.py` (hard fail if missing). Extras via `PHASE1_WRITE_EXTRA`. Contract: [`docs/tape_plugin.md`](tape_plugin.md).
 
 ### Phase 2 — Index fund *(partially implemented)*
 
@@ -121,7 +121,7 @@ reference data (WRDS, …)
 | Schema-mapped PM orders | Done | `pm_orders.csv` via `src/order_schema.py` |
 | Notional-weighted blotter summaries | Done | `order_notional_summary.csv` |
 | Benchmark by-year panel | Done | `benchmark_by_year.csv` |
-| Dividend-rule sensitivity | Missing | — |
+| Dividend-rule sensitivity | Done (`DIVIDEND_SENSITIVITY`) | `dividend_sensitivity.csv` |
 
 Already true on the Phase 2 path:
 
@@ -129,12 +129,13 @@ Already true on the Phase 2 path:
 - Seeded synthetic subscriptions/redemptions → flow orders.
 - Ordinary splits / USD cash dividends; hard exclusions with renormalization.
 - Padded quotes disclosed on disk (look-ahead fallback—not live auction evidence).
+- Optional dividend-mode contrasts: accrual (baseline) vs cash-at-ex vs no-cash-div.
 
 Close-to-close “slippage” in the daybook is largely **overnight move**, not execution cost—do not call it TCA.
 
-### Phase 3 — Exec / TCA *(3a one-date landed)*
+### Phase 3 — Exec / TCA *(3a + 3b landed — synthetic tape)*
 
-`main_3_tca.py` reads Phase 2 `pm_orders`, builds a synthetic stock-day tape from CRSP closes, runs CLOSE_AUCTION / VWAP / ARRIVAL_IS desk+impact fills, and writes notional-weighted `order_tca.csv` + `strategy_summary.csv` under `output/3_tca/`. Impact is uncalibrated (mechanics only). Extras via `PHASE3_WRITE_EXTRA`.
+`main_3_tca.py` reads Phase 2 `pm_orders`, loads `MarketTape` (`TAPE_MODE`), runs CLOSE_AUCTION / VWAP / ARRIVAL_IS desk+impact fills (MIC split from `venue_days`), and writes notional-weighted `order_tca.csv`, `strategy_summary.csv` (with fund-level TD/TE columns), and `liquidity_buckets.csv` under `output/3_tca/`. `TCA_ALL_REBALANCES=True` covers every matching rebalance trade date. Impact is uncalibrated (mechanics only). Extras via `PHASE3_WRITE_EXTRA`.
 
 ---
 
@@ -203,10 +204,10 @@ Layout: `main_3_tca.py` → `output/3_tca/`.
 | --- | --- | --- |
 | **R** | Repo relabel / root entrypoints | *(done)* |
 | **0** | Freeze Phase 0 schema + validators | *(done)* |
-| **1** | Phase 1 multi-MIC generator | Tests chain without fund complexity |
-| **2a** | Phase 2 gaps: dividend-rule sensitivity (PM handoff + notional done) | Fund + PM layer largely runs |
+| **1** | Phase 1 multi-MIC generator | *(done — synthetic tape)* |
+| **2a** | Phase 2 dividend-rule sensitivity | *(done — `DIVIDEND_SENSITIVITY`)* |
 | **3a** | Phase 3 one-date E2E | *(done — synthetic tape)* |
-| **3b** | Phase 3 all-rebalance scale | Full-window reports |
+| **3b** | Phase 3 all-rebalance scale + liquidity buckets | *(done — `TCA_ALL_REBALANCES`)* |
 | **Q** | Licensed-data sign-off; calibrate impact | Before quoting costs or TE |
 
 Use disposable checks for schemas, ID linkage, NAV identities, and conservation (delete temp tests after they pass).
@@ -220,7 +221,7 @@ Use disposable checks for schemas, ID linkage, NAV identities, and conservation 
 - Cap-weight proxies are not official float-adjusted index weights.
 - Hard exclusions and flow scenarios bias results; disclose parameters and excluded weight.
 - Overnight close-to-close drift ≠ execution cost.
-- Running `fetch_data` / `main_2_fund` does **not** mean Phase 1 or Phase 3 are done. Phase 2 still lacks dividend-rule sensitivity; PM handoff + notional summaries are on disk.
+- Running `fetch_data` / `main_2_fund` does **not** mean Phase 1 or Phase 3 are done. Dividend sensitivity and all-rebalance TCA are config-gated (`DIVIDEND_SENSITIVITY`, `TCA_ALL_REBALANCES`).
 
 ---
 
@@ -241,6 +242,10 @@ For a declared experiment window, treat the main path as research-ready when:
 | --- | --- |
 | [`docs/blueprint.md`](blueprint.md) | Phase model, layout, sequence |
 | [`README.md`](../README.md) | Operator quick start |
-| [`docs/dataset.md`](dataset.md) | CSV schemas for `data/` and `output/2_fund/` |
+| [`docs/dataset.md`](dataset.md) | CSV schemas for `data/` and `output/` |
+| [`docs/data_reality.md`](data_reality.md) | Real vs stand-in data; tape dual mode; quoting rules |
+| [`docs/tape_plugin.md`](tape_plugin.md) | Private `MarketTape` plugin contract |
+| [`docs/order_schema.md`](order_schema.md) | Phase 0 order contract |
 
-Next: Phase 3b all-rebalance scale, impact calibration, and/or Phase 1 generator.
+Next: fill private tape plugin + impact calibration (Phase 0–3 already run on
+synthetic tape by default).

@@ -29,15 +29,37 @@ END_DATE = "2026-06-30"  # ledger / experiment end
 # Phase 0 core: example_{pm,trader,broker,fills}.csv
 # Extra: field_dictionary, conservation_report, schema_version.txt, validation_report.json
 PHASE0_WRITE_EXTRA = False
-# Phase 1 stub (reserved)
+# Phase 1 core: pm/trader/broker/fills.csv
+# Extra: stock_days.csv, venue_days.csv, generator_meta.json
 PHASE1_WRITE_EXTRA = False
 # Phase 2 core: daily_nav.csv, fills.csv, pm_orders.csv
+#   (+ dividend_sensitivity.csv when DIVIDEND_SENSITIVITY=True)
 # Extra: holdings, blotter orders, schedule/flows/journal/exclusions/padded,
 #        benchmark panels, notional summary, run_manifest.json
 PHASE2_WRITE_EXTRA = False
-# Phase 3 core: order_tca.csv, strategy_summary.csv
-# Extra: per-strategy trader/broker/fills, stock_days, impact_model.json
+# Phase 3 core: order_tca.csv, strategy_summary.csv, liquidity_buckets.csv
+# Extra: per-strategy trader/broker/fills, stock_days, venue_days, impact_model.json
 PHASE3_WRITE_EXTRA = False
+
+# Market tape for Phase 1 / Phase 3: "synthetic" (default) or "plugin".
+# plugin requires SIMP_TAPE_PLUGIN_DIR → <dir>/tape_plugin.py (hard fail if missing).
+TAPE_MODE = "synthetic"
+
+# =============================================================================
+# Phase 1 — main_1_generator.py → output/1_generator/
+# Synthetic multi-MIC orders (no Phase 2 required). Optional vendor tape via
+# env SIMP_TAPE_PLUGIN_DIR pointing at a gitignored plugin directory.
+# =============================================================================
+GENERATOR_SEED = 7
+GENERATOR_N_ORDERS = 40
+GENERATOR_TRADE_DATE = None  # YYYY-MM-DD, or None → tape/default demo day
+GENERATOR_STRATEGY = "VWAP"  # CLOSE_AUCTION | VWAP | ARRIVAL_IS
+GENERATOR_SHARE_MIN = 100
+GENERATOR_SHARE_MAX = 5_000
+GENERATOR_BUY_PROB = 0.55
+GENERATOR_REASON = "REBALANCE"
+GENERATOR_PRICE_NOISE = 0.002
+GENERATOR_FUND_ID = "SIMP_SP500_10B"
 
 # =============================================================================
 # Phase 2 — main_2_fund.py → output/2_fund/
@@ -57,6 +79,8 @@ FLOW_LUMPY_PROB = 0.01
 FLOW_LUMPY_BPS = (50.0, 300.0)
 FLOW_MAX_REDEMPTION_BPS = 500.0
 FLOW_BAND_BPS = 25.0
+# When True: re-run cash_at_ex + no_cash_div contrasts; write dividend_sensitivity.csv
+DIVIDEND_SENSITIVITY = True
 
 # =============================================================================
 # Phase 3 — main_3_tca.py → output/3_tca/
@@ -64,6 +88,8 @@ FLOW_BAND_BPS = 25.0
 # =============================================================================
 # None → largest REBALANCE trade_date in output/2_fund/pm_orders.csv
 TCA_TRADE_DATE = None
+# True → all REBALANCE (TCA_REASONS) trade dates; overrides TCA_TRADE_DATE
+TCA_ALL_REBALANCES = True
 TCA_REASONS = ("REBALANCE",)  # filter pm_orders.reason
 TCA_STRATEGIES = ("CLOSE_AUCTION", "VWAP", "ARRIVAL_IS")
 # Uncalibrated impact knobs (mechanics only — not vendor-fitted)

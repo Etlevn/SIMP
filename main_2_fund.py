@@ -7,6 +7,7 @@ Assumes ``fetch_data.py`` already wrote the four core CSVs and
     ensure_inputs → run_fund → print table previews
 
 Default disk (core): ``daily_nav.csv``, ``fills.csv``, ``pm_orders.csv``.
+Set ``DIVIDEND_SENSITIVITY=True`` to also write ``dividend_sensitivity.csv``.
 Set ``PHASE2_WRITE_EXTRA=True`` in ``config.py`` for holdings, blotter, audit,
 benchmark panels, notional summary, and ``run_manifest.json``.
 """
@@ -58,7 +59,8 @@ def main() -> int:
         f"sessions={result['sessions']} "
         f"fund_start={result['fund_start']} "
         f"fills=reference_close "
-        f"write_extra={result.get('write_extra', False)}"
+        f"write_extra={result.get('write_extra', False)} "
+        f"dividend_sensitivity={result.get('dividend_sensitivity', False)}"
     )
     reasons = result.get("exclusion_reasons") or {}
     reason_txt = ",".join(f"{k}:{v}" for k, v in sorted(reasons.items())) or "none"
@@ -77,8 +79,23 @@ def main() -> int:
     te = result.get("tracking_error_annualized_bps")
     if td is not None and te is not None:
         print(f"tracking_difference_bps={td:.2f} tracking_error_bps={te:.2f}")
+    sens = result.get("dividend_sensitivity_table")
+    if sens is not None and len(sens):
+        for row in sens.itertuples(index=False):
+            print(
+                f"div_mode={row.mode} ending_nav={row.ending_nav:.4f} "
+                f"delta_nav={row.delta_ending_nav:.4f} "
+                f"delta_td_bps={row.delta_td_bps:.2f} "
+                f"delta_te_bps={row.delta_te_bps:.2f}"
+            )
     for name, title in CORE_TABLES:
         print_csv(OUTPUT_2_FUND / name, title=title, blank_before=True)
+    if result.get("dividend_sensitivity"):
+        print_csv(
+            OUTPUT_2_FUND / "dividend_sensitivity.csv",
+            title="dividend_sensitivity",
+            blank_before=True,
+        )
     if result.get("write_extra"):
         for name, title in EXTRA_TABLES:
             print_csv(OUTPUT_2_FUND / name, title=title, blank_before=True)

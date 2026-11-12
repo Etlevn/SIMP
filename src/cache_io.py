@@ -130,7 +130,7 @@ def verify_coverage(folder=None, *, start=None, end=None, schema=None, required=
 
 
 def validate_local(folder=None, *, start: str, end: str, schema: str) -> dict:
-    """Local cache check for Stage 1/2 (hard essentials, soft reference pad).
+    """Local cache check for fetch_data / Phase 2 (hard essentials, soft reference pad).
 
     Does **not** read ``coverage.json`` (WRDS-fetch provenance only).
 
@@ -202,7 +202,7 @@ def validate_local(folder=None, *, start: str, end: str, schema: str) -> dict:
     if first_ref not in cal:
         warnings_out.append(
             f"reference_date {first_ref.date()} not in calendar; "
-            "Stage 2 may pad reference_close sessions"
+            "Phase 2 may pad reference_close sessions"
         )
     else:
         try:
@@ -212,7 +212,7 @@ def validate_local(folder=None, *, start: str, end: str, schema: str) -> dict:
         if ref_i == 0:
             warnings_out.append(
                 "no calendar session before first reference_date; "
-                "Stage 2 may pad the decision session"
+                "Phase 2 may pad the decision session"
             )
     for msg in warnings_out:
         warnings.warn(msg, stacklevel=2)

@@ -1,4 +1,4 @@
-# Dotfiles / local tooling
+# Dotfiles / local tooling (.* covers .cursor/ — do not force-add)
 .*
 !.gitignore
 !.env.template
@@ -10,6 +10,9 @@ _*/
 
 # Private notes
 /notes/
+
+# Local agent plans / specs
+/docs/superpowers/
 
 # Python / tooling
 __pycache__/

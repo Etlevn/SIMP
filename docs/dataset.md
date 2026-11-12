@@ -1,10 +1,10 @@
 # SIMP dataset layout
 
-Schemas for the flat local inputs under `data/` and the Stage 2 fund outputs under `output/2_fund/`. Permanent security ID `permno` is the primary join key across tables.
+Schemas for the flat local inputs under `data/`, Phase 0 schema artifacts under `output/0_schema/`, and Phase 2 fund outputs under `output/2_fund/`. Permanent security ID `permno` is the primary join key across tables. Phase 0 contract: [`docs/order_schema.md`](order_schema.md).
 
 **Publishing note:** contents of `data/` (except placeholders such as `.gitkeep`) are **gitignored**. The entire `output/` tree is gitignored (including empty folders). Do not commit licensed extracts or generated ledgers.
 
-For product intent and how to run the pipeline, see the root [`README.md`](../README.md).
+For product intent see [`docs/blueprint.md`](blueprint.md). How to run the pipeline: root [`README.md`](../README.md).
 
 ---
 
@@ -13,41 +13,53 @@ For product intent and how to run the pipeline, see the root [`README.md`](../RE
 ```text
 SIMP/
 ├── data/
-│   ├── weights.csv          # required
-│   ├── daily_prices.csv     # required
-│   ├── calendar.csv         # required
-│   ├── events.csv           # required (WRDS distributions → dividend/split rows)
-│   └── coverage.json        # optional WRDS-fetch snapshot (not a validity gate)
-├── output/2_fund/           # Stage 2 fund artifacts (four CSVs)
-├── config.py                # experiment window, fund & flow knobs
-├── docs/dataset.md          # this file
+│   ├── weights.csv                 # required
+│   ├── daily_prices.csv            # required
+│   ├── calendar.csv                # required
+│   ├── events.csv                  # required (WRDS distributions → dividend/split rows)
+│   ├── benchmark_sp500_tr.csv      # required for Phase 2 (CRSP S&P 500 TR)
+│   ├── benchmark_sp500_tr.json     # fetch meta (sha256); written with the CSV
+│   └── coverage.json               # optional WRDS-fetch snapshot (not a validity gate)
+├── output/0_schema/                # Phase 0 example order chain
+├── output/2_fund/                  # Phase 2 core handoff (+ optional extras)
+├── output/3_tca/                   # Phase 3 order_tca + strategy_summary
+├── fetch_data.py                   # independent data tool
+├── main_0_schema.py                # Phase 0 entrypoint
+├── main_2_fund.py                  # Phase 2 entrypoint
+├── main_3_tca.py                   # Phase 3 entrypoint
+├── config.py                       # experiment window, fund & flow knobs
+├── docs/dataset.md                 # this file
 └── pyproject.toml
 ```
 
 | `config.py` setting | Meaning |
 | ------------------- | ------- |
-| `START_DATE` / `END_DATE` | Experiment window (Stage 1 validate/extract; Stage 2 snapshots / fund end) |
-| `WEIGHTS_START` / `STOCK_SCHEMA` / `BATCH_SIZE` | Used when Stage 1 must fetch WRDS |
-| `INITIAL_CASH` / `CASH_BUFFER_BPS` / `FEE_BPS` | Stage 2 fund sizing |
-| `FLOW_*` / `FLOW_BAND_BPS` | Stage 2 synthetic investor-flow knobs (always applied) |
+| `START_DATE` / `END_DATE` | Experiment window (`fetch_data` validate/extract; Phase 2 snapshots / fund end) |
+| `WEIGHTS_START` / `STOCK_SCHEMA` / `BATCH_SIZE` | Used when `fetch_data` must fetch WRDS |
+| `INITIAL_CASH` / `CASH_BUFFER_BPS` / `FEE_BPS` | Phase 2 fund sizing |
+| `FLOW_*` / `FLOW_BAND_BPS` | Phase 2 synthetic investor-flow knobs (always applied) |
 
-Stage 2 rebalance fills are always **reference-close** (decide on the session before `weights.reference_date`, fill at that reference close).
+Phase 2 rebalance fills are always **reference-close** (decide on the session before `weights.reference_date`, fill at that reference close).
 
-### Stage 1 — validate or overwrite
+### `fetch_data.py` — validate or overwrite
 
-`scripts/run_1_data.py` checks the four CSVs against the experiment window (`coverage.json` is ignored as a gate). Hard failure (missing files/columns, missing `START_DATE` weight snapshot, or incomplete START–END calendar/price span) triggers a WRDS overwrite of the four CSVs plus a fresh `coverage.json`. Missing sessions *before* the first `reference_date` only warn — Stage 2 may pad them.
+`fetch_data.py` checks the four CSVs against the experiment window (`coverage.json` is ignored as a gate). Hard failure (missing files/columns, missing `START_DATE` weight snapshot, or incomplete START–END calendar/price span) triggers a WRDS overwrite of the four CSVs plus a fresh `coverage.json`. Missing sessions *before* the first `reference_date` only warn — Phase 2 may pad them.
 
-Force refresh: delete or corrupt `data/` then re-run Stage 1.
+After the four-file step, `fetch_data` **ensures** `benchmark_sp500_tr.csv` covers the experiment calendar **and** reference-close decision/reference sessions implied by `weights.reference_date` (even when those days are absent from `calendar.csv`). Invalid/missing benchmark triggers a WRDS CRSP `dsp500` / `dsp500_v2` fetch (`vwretd`).
 
-```bash
-PYTHONPATH=src python scripts/run_1_data.py
-```
-
-### Stage 2 — fund daybook (local only)
+Force refresh: delete or corrupt `data/` then re-run `fetch_data.py`.
 
 ```bash
-PYTHONPATH=src python scripts/run_2_fund.py
+PYTHONPATH=src python fetch_data.py
 ```
+
+### Phase 2 — fund daybook (local only)
+
+```bash
+PYTHONPATH=src python main_2_fund.py
+```
+
+Phase 2 requires a usable `data/benchmark_sp500_tr.csv`. Missing coverage fails with a clear `fetch_data` / WRDS entitlement message (no silent skip).
 
 Reference-close needs `weights.reference_date` and calendar/prices covering the session **before** the first reference date (typically Thursday decision / Friday fill). A WRDS fetch pads ~14 calendar days before `START_DATE` for that purpose.
 
@@ -55,7 +67,7 @@ Reference-close needs `weights.reference_date` and calendar/prices covering the 
 
 ## `data/weights.csv`
 
-Point-in-time index membership and **capitalization-weight proxies**. Stage 1 write path keeps only:
+Point-in-time index membership and **capitalization-weight proxies**. fetch_data write path keeps only:
 
 | Field | Meaning |
 | ----- | ------- |
@@ -64,7 +76,7 @@ Point-in-time index membership and **capitalization-weight proxies**. Stage 1 wr
 | `permno` | Security ID |
 | `cap_weight_proxy` | Weight in [0, 1]; should sum to 1 per `date` |
 
-Readers still tolerate extra columns on older fat caches until the next Stage 1 overwrite.
+Readers still tolerate extra columns on older fat caches until the next fetch_data overwrite.
 
 ---
 
@@ -91,7 +103,7 @@ Raw (unadjusted) closes for valuation and close-proxy execution.
 
 ## `data/events.csv`
 
-Corporate actions that enter the daybook. Normative source: WRDS/CRSP `stkdistributions` via `fetch_wrds`, filtered to `CASH_DIVIDEND` and `STOCK_SPLIT` only (no dual-source reconcile on the main path). Stage 1 write path keeps only:
+Corporate actions that enter the daybook. Normative source: WRDS/CRSP `stkdistributions` via `fetch_wrds`, filtered to `CASH_DIVIDEND` and `STOCK_SPLIT` only (no dual-source reconcile on the main path). fetch_data write path keeps only:
 
 | Field | Meaning |
 | ----- | ------- |
@@ -102,13 +114,13 @@ Corporate actions that enter the daybook. Normative source: WRDS/CRSP `stkdistri
 | `split_ratio`, `cash_per_share` | Cash dividend or split factor |
 | `currency` | Currency (USD for the simple ledger) |
 
-Upstream normalize may still compute `requires_review` in memory; Stage 1 refuses to write while any such flag is true (resolve or drop before `write_flat_inputs`).
+Upstream normalize may still compute `requires_review` in memory; `fetch_data` refuses to write while any such flag is true (resolve or drop before `write_flat_inputs`).
 
 ---
 
 ## `data/coverage.json`
 
-Optional **WRDS-fetch provenance** only. Written when Stage 1 overwrites via WRDS; **not** read by `validate_local` or Stage 2. Stale or missing coverage does not trigger a refetch. Changing `START_DATE` does not require editing this file.
+Optional **WRDS-fetch provenance** only. Written when `fetch_data` overwrites via WRDS; **not** read by `validate_local` or Phase 2. Stale or missing coverage does not trigger a refetch. Changing `START_DATE` does not require editing this file.
 
 | Field | Meaning |
 | ----- | ------- |
@@ -119,9 +131,24 @@ Optional **WRDS-fetch provenance** only. Written when Stage 1 overwrites via WRD
 
 ---
 
+## `data/benchmark_sp500_tr.csv`
+
+CRSP S&P 500 **total return** (`vwretd`) for fund tracking. `fetch_data` writes/refreshes it; Phase 2 always consumes it. Companion `benchmark_sp500_tr.json` stores row count, sha256, and source table id.
+
+| Field | Meaning |
+| ----- | ------- |
+| `date` | Session |
+| `benchmark_return` | Daily total return (decimal) |
+| `source` | Discovered table id (e.g. `crsp_q_indexes.dsp500_v2.vwretd`) |
+| optional | `price_return` / `sp_price_return` / `sp_index_level` when present in the release |
+
+Gaps are never filled. Synthetic offline stand-ins are for mechanics only and must not be quoted as research results.
+
+---
+
 ## `output/2_fund/`
 
-Stage 2 (`run_2_fund`) writes **only** these four CSVs. `action_journal`, `rebalance_schedule`, `synthetic_flows`, and validation/provenance stay in memory. The terminal prints scalar summaries plus table previews of the disk files.
+Phase 2 (`main_2_fund.py`) **always** writes core handoff: `daily_nav.csv`, `fills.csv`, `pm_orders.csv`. Set `PHASE2_WRITE_EXTRA=True` in `config.py` for holdings, blotter `orders`, audit / benchmark panels, notional summary, and `run_manifest.json`. The terminal always prints scalar summaries (including tracking difference / error) plus previews of written tables.
 
 ### Hard-name exclusions (fixed)
 
@@ -131,7 +158,7 @@ Always applied before simulation (not a config switch):
 - Drop snapshot rows whose holding window has missing/nonpositive closes, or whose decision/execution days lack a `TR` trade close.
 - Renormalize remaining weights to sum to 1.
 
-This is a **simulator simplification** (see README). Exclusion counts print on the terminal only.
+This is a **simulator simplification** (see README). Excluded rows are written to `excluded_security_snapshots.csv`; original-weight mass by snapshot is recorded in `run_manifest.json`.
 
 ### `daily_nav.csv`
 
@@ -148,25 +175,21 @@ This is a **simulator simplification** (see README). Exclusion counts print on t
 | `fees` | Trading fees that day |
 | `fund_return` | Unit-NAV return |
 
-### `daily_holdings.csv`
+### `pm_orders.csv`
+
+Phase 0 PM handoff from the blotter (`src/order_schema.py`). Shares are **unsigned**; `side` carries direction. Full four-level contract: [`docs/order_schema.md`](order_schema.md).
 
 | Field | Meaning |
 | ----- | ------- |
-| `date`, `permno` | Session and security |
-| `shares` | End-of-day shares |
-| `close_price` | Valuation close |
-
-### `orders.csv`
-
-| Field | Meaning |
-| ----- | ------- |
-| `order_id` | Stable id for the intended trade |
-| `decision_date` | Session when the order was sized |
-| `permno`, `side`, `signed_quantity` | Instrument and signed size |
-| `decision_price` | Close used at decision |
+| `order_id` | Same as blotter `order_id` when present |
+| `fund_id` | Default `SIMP_SP500_10B` |
+| `decision_date`, `decision_ts` | Decision session + 16:00 NY wall clock |
+| `trade_date` | Expected / execution session |
+| `permno`, `side`, `shares`, `decision_price` | Instrument, direction, whole shares, decision close |
 | `reason` | `INITIAL` / `REBALANCE` / `INFLOW` / `OUTFLOW` |
-| `expected_execution_date` | Next session (reference close for rebalances) |
-| `snapshot_date`, `reference_date` | Index snapshot metadata (NaT for pure flow orders) |
+| `benchmark` | `CLOSE` for INITIAL/REBALANCE; `ARRIVAL` for flows |
+| `urgency` | `HIGH` for OUTFLOW; else `MEDIUM` |
+| `notional_usd` | `shares × decision_price` |
 
 ### `fills.csv`
 
@@ -180,23 +203,48 @@ This is a **simulator simplification** (see README). Exclusion counts print on t
 | `fee` | Fee charged on the fill |
 | `executed_reference_drift` | `filled × (execution_price − decision_price)` |
 
+### Extra audit tables (`PHASE2_WRITE_EXTRA=True`)
+
+| File | Meaning |
+| ---- | ------- |
+| `daily_holdings.csv` | Per-`permno` shares and valuation |
+| `orders.csv` | Simulator blotter (signed qty); prefer `pm_orders.csv` for handoff |
+| `rebalance_schedule.csv` | Snapshot → decision → reference execution dates |
+| `synthetic_flows.csv` | Seeded flow path (`date`, `flow_bps`, `is_lumpy`) |
+| `action_journal.csv` | Corporate-action / accounting journal from the simulator |
+| `excluded_security_snapshots.csv` | Dropped `(date, permno)` rows with `exclusion_reason` (+ weight when available) |
+| `padded_quotes.csv` | Offline carry-back quotes (`date`, `permno`, `source_date`). **Look-ahead fallback** — not live auction evidence |
+| `benchmark_daily.csv` | Per-session fund vs S&P 500 TR active returns / indices |
+| `benchmark_by_year.csv` | Calendar-year fund vs benchmark returns and tracking difference |
+| `order_notional_summary.csv` | Notional by `reason` (+ `ALL` row) |
+| `run_manifest.json` | Config, input sha256s, exclusions, TD/TE scalars |
+
 ---
 
 ## Data flow
 
 ```text
-data/{weights, daily_prices, calendar, events}
+data/{weights, daily_prices, calendar, events, benchmark_sp500_tr}
         → load / verify (coverage ignored as a gate)
         → hard-name exclusions + renormalize
-        → Stage 2: fund_simulator.simulate_fund
+        → Phase 2: fund_simulator.simulate_fund
           (reference-close schedule + synthetic flows)
-        → output/2_fund/{daily_nav, daily_holdings, orders, fills}.csv
+        → output/2_fund/ daily_nav + fills + pm_orders (+ extras if PHASE2_WRITE_EXTRA)
+        → Phase 3: synthetic stock_days + desk strategies + impact fills
+        → output/3_tca/ order_tca + strategy_summary (+ extras if PHASE3_WRITE_EXTRA)
 ```
 
-Stage 1 WRDS overwrite refreshes the four core flat files and writes `coverage.json` as a fetch snapshot. Requires **Python 3.12** and a project install including `wrds`. Events come only from CRSP `stkdistributions`.
+### `output/3_tca/` (Phase 3 core)
+
+| File | Meaning |
+| ---- | ------- |
+| `strategy_summary.csv` | Notional-weighted cost bps by desk strategy (one rebalance day) |
+| `order_tca.csv` | Per-PM-order TCA rows across strategies (`tape_source=synthetic_offline`) |
+
+`fetch_data` WRDS overwrite refreshes the four core flat files and writes `coverage.json` as a fetch snapshot; it also ensures the S&P 500 TR benchmark CSV. Requires **Python 3.12** and a project install including `wrds`. Events come only from CRSP `stkdistributions`.
 
 ---
 
 ## Library helpers (not the main path)
 
-`ledger.simulate` / `pipeline.run_ledger` remain available as library helpers (including next-session control). Older dual-source review helpers under `src/` are **not** wired into `run_1_data` / `run_2_fund`.
+`ledger.simulate` / `pipeline.run_ledger` remain available as library helpers (including next-session control). Older dual-source review helpers under `src/` are **not** wired into `fetch_data` / `main_2_fund`.

@@ -1,4 +1,4 @@
-"""Terminal table previews for ``scripts/run_*.py`` (short titles, no write paths)."""
+"""Terminal table previews for root phase entrypoints (short titles, no write paths)."""
 from __future__ import annotations
 
 from pathlib import Path

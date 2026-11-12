@@ -4,8 +4,8 @@ Extends ``ledger.simulate`` (kept for library/tests) with fixed
 **reference-close** rebalance timing: orders are decided at the close of the
 session *before* the S&P reference date (typically the third Friday) and filled
 in that Friday's closing auction — the same print the index rebalances at. The
-CRSP close is the auction-price proxy until BMLL closing-auction prices join
-the TCA layer.
+CRSP close is the auction-price proxy until closing-auction prices from the
+market-data vendor join the TCA layer.
 
 Target quantities are proportional to *index shares*
 (``cap_weight_proxy / reference_close``) and are sized from the decision-day

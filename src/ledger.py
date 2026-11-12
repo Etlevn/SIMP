@@ -336,15 +336,15 @@ def benchmark_report(navs, benchmark):
                "tracking_error_annualized": float(x.active_return.std(ddof=1) * np.sqrt(252))}
 
 
-def validate_bmll_mapping(mapping, requested):
-    """Validate dated mapping for requested date/PERMNO pairs; reject ambiguity."""
+def validate_vendor_mapping(mapping, requested):
+    """Validate dated vendor-id mapping for requested date/PERMNO pairs; reject ambiguity."""
     m, r = mapping.copy(), requested[["date", "permno"]].drop_duplicates().copy()
-    if not {"permno", "bmll_id", "valid_from", "valid_to"} <= set(m):
+    if not {"permno", "vendor_id", "valid_from", "valid_to"} <= set(m):
         raise ValueError("Missing mapping fields")
     for col in ("valid_from", "valid_to"):
         m[col] = pd.to_datetime(m[col], errors="raise")
     r["date"] = _dates(r.date)
-    if m.bmll_id.isna().any() or m.valid_from.isna().any() or (m.valid_to < m.valid_from).any():
+    if m.vendor_id.isna().any() or m.valid_from.isna().any() or (m.valid_to < m.valid_from).any():
         raise ValueError("Invalid execution-vendor identifier/effective interval")
     merged = r.merge(m, on="permno", how="left")
     valid = merged[merged.date.ge(merged.valid_from) &

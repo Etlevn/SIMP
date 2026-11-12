@@ -1,7 +1,10 @@
 """Orchestrate flat data/ load (or WRDS fetch) and daily-fund outputs."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+import subprocess
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -9,6 +12,12 @@ from typing import Any
 import pandas as pd
 
 import corporate_actions as ca
+from benchmark import (
+    fetch_sp500_total_return,
+    load_benchmark,
+    performance_report,
+    save_benchmark,
+)
 from cache_io import (
     load_inputs,
     validate_local,
@@ -22,10 +31,15 @@ from fund_simulator import (
 )
 from ledger import prepare_exclusion_scenario, simulate, temporal_price_exclusions
 from market_data import fetch_daily_prices, trading_calendar
+from order_schema import SCHEMA_VERSION, notional_summary, pm_orders_from_blotter
 from paths import (
+    BENCHMARK_CSV,
+    CALENDAR_CSV,
+    CORE_INPUT_FILES,
     DATA_DIR,
-    FUND_OUTPUT_TABLES,
     OUTPUT_DIR,
+    RUN_MANIFEST_JSON,
+    WEIGHTS_CSV,
     clear_output_dir,
     ensure_data_dirs,
 )
@@ -51,6 +65,7 @@ class PipelineConfig:
     flow_lumpy_bps: tuple[float, float] = (50.0, 300.0)
     flow_max_redemption_bps: float = 500.0
     flow_band_bps: float = 25.0
+    write_extra: bool = False  # PHASE2_WRITE_EXTRA — audit / secondary CSVs
 
     @classmethod
     def from_user_config(cls, user_config: ModuleType | Any) -> "PipelineConfig":
@@ -72,6 +87,7 @@ class PipelineConfig:
             flow_lumpy_bps=(float(lumpy[0]), float(lumpy[1])),
             flow_max_redemption_bps=float(getattr(user_config, "FLOW_MAX_REDEMPTION_BPS", 500.0)),
             flow_band_bps=float(getattr(user_config, "FLOW_BAND_BPS", 25.0)),
+            write_extra=bool(getattr(user_config, "PHASE2_WRITE_EXTRA", False)),
         )
 
     @classmethod
@@ -95,9 +111,10 @@ ensure_cache = ensure_inputs
 
 
 def prepare_data(cfg: PipelineConfig | None = None) -> dict:
-    """Stage 1: prefer local cache; on B-tier failure overwrite via WRDS.
+    """``fetch_data``: prefer local cache; on B-tier failure overwrite via WRDS.
 
-    Force refresh: delete or corrupt ``data/`` then re-run Stage 1.
+    Always ensures ``data/benchmark_sp500_tr.csv`` covers the experiment window.
+    Force refresh: delete or corrupt ``data/`` then re-run ``fetch_data.py``.
     """
     cfg = cfg or PipelineConfig.load()
     ensure_data_dirs()
@@ -106,7 +123,6 @@ def prepare_data(cfg: PipelineConfig | None = None) -> dict:
             DATA_DIR, start=cfg.start_date, end=cfg.end_date, schema=cfg.stock_schema)
         info = dict(info)
         info["source"] = "cache"
-        return info
     except Exception as exc:
         print(
             f"Local data/ failed validation ({type(exc).__name__}: {exc}); "
@@ -116,7 +132,237 @@ def prepare_data(cfg: PipelineConfig | None = None) -> dict:
         info = fetch_wrds(cfg)
         info = dict(info)
         info["source"] = "fetch_wrds"
-        return info
+    bench_info = ensure_benchmark(cfg)
+    info["benchmark"] = bench_info
+    return info
+
+
+def _benchmark_calendar_window(cfg: PipelineConfig) -> pd.DatetimeIndex:
+    """Sessions the S&P 500 TR series must cover, including reference-close pads.
+
+    Offline caches often omit the Thursday/Friday before a Monday snapshot.
+    Benchmark coverage must still include those decision/reference sessions so
+    Stage 2 NAV days after ``pad_reference_close_coverage`` are comparable.
+    """
+    if not CALENDAR_CSV.exists():
+        raise FileNotFoundError(f"Missing {CALENDAR_CSV}")
+    if not WEIGHTS_CSV.exists():
+        raise FileNotFoundError(f"Missing {WEIGHTS_CSV}")
+
+    cal = pd.to_datetime(pd.read_csv(CALENDAR_CSV)["date"]).dt.normalize()
+    pad_start = (pd.Timestamp(cfg.start_date) - pd.DateOffset(days=14)).normalize()
+    end = pd.Timestamp(cfg.end_date).normalize()
+    window = set(cal[(cal >= pad_start) & (cal <= end)].tolist())
+
+    weights = pd.read_csv(WEIGHTS_CSV)
+    weights["date"] = pd.to_datetime(weights["date"]).dt.normalize()
+    snaps = weights[weights.date.between(cfg.start_date, cfg.end_date)]
+    if "reference_date" in snaps.columns:
+        snaps = snaps.copy()
+        snaps["reference_date"] = pd.to_datetime(snaps["reference_date"]).dt.normalize()
+        for ref in snaps.reference_date.dropna().unique():
+            ref = pd.Timestamp(ref).normalize()
+            prior = pd.bdate_range(end=ref, periods=2)[0]
+            if prior <= end:
+                window.add(prior)
+            if ref <= end:
+                window.add(ref)
+    out = pd.DatetimeIndex(sorted(window))
+    if out.empty:
+        raise ValueError("No calendar sessions in the benchmark coverage window")
+    return out
+
+
+def ensure_benchmark(cfg: PipelineConfig | None = None) -> dict:
+    """Reuse local S&P 500 TR CSV when valid; otherwise fetch from WRDS and overwrite."""
+    from benchmark import validate_benchmark
+    from wrds_auth import wrds_session
+
+    cfg = cfg or PipelineConfig.load()
+    cal = _benchmark_calendar_window(cfg)
+    start, end = cal.min(), cal.max()
+    try:
+        bench = validate_benchmark(load_benchmark(DATA_DIR), calendar=cal, start=start, end=end)
+        return {
+            "source": "cache",
+            "path": str(BENCHMARK_CSV),
+            "rows": len(bench),
+            "first": str(bench.date.min().date()),
+            "last": str(bench.date.max().date()),
+        }
+    except Exception as exc:
+        print(
+            f"Benchmark cache unusable ({type(exc).__name__}: {exc}); "
+            "fetching CRSP S&P 500 total return",
+            flush=True,
+        )
+        with wrds_session() as db:
+            bench = fetch_sp500_total_return(db, start, end, calendar=cal)
+        save_benchmark(bench, DATA_DIR)
+        return {
+            "source": "fetch_wrds",
+            "path": str(BENCHMARK_CSV),
+            "rows": len(bench),
+            "first": str(bench.date.min().date()),
+            "last": str(bench.date.max().date()),
+        }
+
+
+def _file_sha256(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _git_commit() -> str | None:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=DATA_DIR.parent,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return out.strip() or None
+    except Exception:
+        return None
+
+
+def _excluded_weight_by_snapshot(
+    snapshots: pd.DataFrame, cut_parts: list[pd.DataFrame]
+) -> dict[str, float]:
+    if not cut_parts:
+        return {}
+    cut = pd.concat(cut_parts, ignore_index=True)
+    if cut.empty:
+        return {}
+    snap = snapshots.copy()
+    snap["date"] = pd.to_datetime(snap["date"]).dt.normalize()
+    cut = cut.copy()
+    cut["date"] = pd.to_datetime(cut["date"]).dt.normalize()
+    if "cap_weight_proxy" not in cut.columns:
+        cut = cut.merge(
+            snap[["date", "permno", "cap_weight_proxy"]],
+            on=["date", "permno"],
+            how="left",
+        )
+    weights = pd.to_numeric(cut["cap_weight_proxy"], errors="coerce").fillna(0.0)
+    cut = cut.assign(_w=weights)
+    by = cut.groupby(cut["date"].dt.strftime("%Y-%m-%d"))["_w"].sum()
+    return {k: float(v) for k, v in by.items()}
+
+
+def _write_fund_artifacts(
+    *,
+    results: dict,
+    flows: pd.DataFrame,
+    cut_parts: list[pd.DataFrame],
+    pad_rows: pd.DataFrame,
+    schedule: pd.DataFrame,
+    snapshots: pd.DataFrame,
+    cfg: PipelineConfig,
+    fund_start: pd.Timestamp,
+    fund_end: pd.Timestamp,
+    excluded_rows: int,
+    excluded_permnos: int,
+    reason_counts: dict,
+    flow_nonzero: int,
+) -> dict:
+    """Persist core tables; optional audit extras when ``cfg.write_extra``."""
+    try:
+        bench = load_benchmark(DATA_DIR)
+    except Exception as exc:
+        raise ValueError(
+            f"Phase 2 requires a usable S&P 500 TR benchmark ({type(exc).__name__}: {exc}). "
+            "Re-run fetch_data.py and confirm WRDS index entitlements."
+        ) from exc
+    daily, summary, by_year = performance_report(
+        results["daily_nav"], bench, evaluation_start=fund_start, evaluation_end=fund_end
+    )
+    pm_orders = pm_orders_from_blotter(results["orders"])
+    notion = notional_summary(pm_orders)
+
+    if cut_parts:
+        excluded = pd.concat(cut_parts, ignore_index=True)
+    else:
+        excluded = pd.DataFrame(
+            columns=["date", "permno", "exclusion_reason", "cap_weight_proxy"]
+        )
+    if not excluded.empty and "cap_weight_proxy" not in excluded.columns:
+        snap = snapshots.copy()
+        snap["date"] = pd.to_datetime(snap["date"]).dt.normalize()
+        excluded = excluded.copy()
+        excluded["date"] = pd.to_datetime(excluded["date"]).dt.normalize()
+        excluded = excluded.merge(
+            snap[["date", "permno", "cap_weight_proxy"]],
+            on=["date", "permno"],
+            how="left",
+        )
+
+    pad = pad_rows.copy() if pad_rows is not None else pd.DataFrame()
+    if pad.empty:
+        pad = pd.DataFrame(columns=["date", "permno", "source_date"])
+
+    clear_output_dir()
+    # Core handoff (NAV / fills / PM orders)
+    results["daily_nav"].to_csv(OUTPUT_DIR / "daily_nav.csv", index=False)
+    results["fills"].to_csv(OUTPUT_DIR / "fills.csv", index=False)
+    pm_orders.to_csv(OUTPUT_DIR / "pm_orders.csv", index=False)
+
+    if cfg.write_extra:
+        results["daily_holdings"].to_csv(OUTPUT_DIR / "daily_holdings.csv", index=False)
+        results["orders"].to_csv(OUTPUT_DIR / "orders.csv", index=False)
+        schedule.to_csv(OUTPUT_DIR / "rebalance_schedule.csv", index=False)
+        flows.to_csv(OUTPUT_DIR / "synthetic_flows.csv", index=False)
+        results["action_journal"].to_csv(OUTPUT_DIR / "action_journal.csv", index=False)
+        excluded.to_csv(OUTPUT_DIR / "excluded_security_snapshots.csv", index=False)
+        pad.to_csv(OUTPUT_DIR / "padded_quotes.csv", index=False)
+        daily.to_csv(OUTPUT_DIR / "benchmark_daily.csv", index=False)
+        by_year.to_csv(OUTPUT_DIR / "benchmark_by_year.csv", index=False)
+        notion.to_csv(OUTPUT_DIR / "order_notional_summary.csv", index=False)
+
+    input_hashes = {
+        name: _file_sha256(DATA_DIR / name)
+        for name in (*CORE_INPUT_FILES, BENCHMARK_CSV.name)
+    }
+    nav = results["daily_nav"]
+    all_row = notion.loc[notion.reason.eq("ALL")]
+    total_notional = float(all_row.notional_usd.iloc[0]) if len(all_row) else 0.0
+    manifest = {
+        "phase": "2_fund",
+        "stage": "2_fund",
+        "schema_version": SCHEMA_VERSION,
+        "write_extra": bool(cfg.write_extra),
+        "git_commit": _git_commit(),
+        "config": asdict(cfg),
+        "fund_start": str(fund_start.date()),
+        "fund_end": str(fund_end.date()),
+        "ending_nav": float(nav.iloc[-1].nav),
+        "sessions": int(len(nav)),
+        "approved_events": None,  # filled by caller via update
+        "padded_quote_rows": int(len(pad_rows)) if pad_rows is not None else 0,
+        "excluded_rows": excluded_rows,
+        "excluded_permnos": excluded_permnos,
+        "exclusion_reasons": reason_counts,
+        "excluded_original_weight_by_snapshot": _excluded_weight_by_snapshot(
+            snapshots, cut_parts
+        ),
+        "flow_sessions_nonzero": flow_nonzero,
+        "pm_orders": int(len(pm_orders)),
+        "order_notional_usd": total_notional,
+        "input_sha256": input_hashes,
+        "benchmark_summary": {
+            k: (None if isinstance(v, float) and (v != v) else v)
+            for k, v in summary.items()
+        },
+    }
+    return {
+        "manifest": manifest,
+        "benchmark_summary": summary,
+        "benchmark_daily": daily,
+        "pm_orders": pm_orders,
+        "order_notional_summary": notion,
+        "write_extra": bool(cfg.write_extra),
+    }
 
 
 def apply_hard_exclusions(
@@ -169,7 +415,7 @@ def _exclusion_summary(cut_parts: list[pd.DataFrame]) -> tuple[int, int, dict]:
 def run_ledger(cfg: PipelineConfig | None = None) -> dict:
     """Library/test helper: next-session ``simulate`` → ``OUTPUT_DIR``.
 
-    Not a user stage. Prefer ``run_fund`` / ``scripts/run_2_fund.py``.
+    Not a user phase. Prefer ``run_fund`` / ``main_2_fund.py``.
     """
     cfg = cfg or PipelineConfig.load()
     ensure_inputs(cfg)
@@ -245,13 +491,33 @@ def run_fund(cfg: PipelineConfig | None = None) -> dict:
         replay_snapshots, prices, calendar, replay_events, fund_start, fund_end,
         initial_cash=cfg.initial_cash, cash_buffer_bps=cfg.cash_buffer_bps,
         fee_bps=cfg.fee_bps, flows=flows, flow_band_bps=cfg.flow_band_bps)
-    clear_output_dir()
-    for name in FUND_OUTPUT_TABLES:
-        results[name].to_csv(OUTPUT_DIR / f"{name}.csv", index=False)
 
     excluded_rows, excluded_permnos, reason_counts = _exclusion_summary(cut_parts)
-    nav = results["daily_nav"]
     flow_nonzero = int(flows["flow_bps"].ne(0).sum()) if len(flows) else 0
+    written = _write_fund_artifacts(
+        results=results,
+        flows=flows,
+        cut_parts=cut_parts,
+        pad_rows=pad_rows,
+        schedule=results["schedule"],
+        snapshots=snapshots,
+        cfg=cfg,
+        fund_start=fund_start,
+        fund_end=fund_end,
+        excluded_rows=excluded_rows,
+        excluded_permnos=excluded_permnos,
+        reason_counts=reason_counts,
+        flow_nonzero=flow_nonzero,
+    )
+    manifest = written["manifest"]
+    manifest["approved_events"] = len(replay_events)
+    if cfg.write_extra:
+        (OUTPUT_DIR / RUN_MANIFEST_JSON).write_text(
+            json.dumps(manifest, indent=2, default=str) + "\n"
+        )
+
+    nav = results["daily_nav"]
+    summary = written["benchmark_summary"]
     return {
         "ending_nav": float(nav.iloc[-1].nav),
         "sessions": len(nav),
@@ -262,7 +528,15 @@ def run_fund(cfg: PipelineConfig | None = None) -> dict:
         "exclusion_reasons": reason_counts,
         "flow_sessions_nonzero": flow_nonzero,
         "padded_quote_rows": int(len(pad_rows)),
+        "pm_orders": int(len(written["pm_orders"])),
+        "order_notional_usd": float(manifest.get("order_notional_usd") or 0.0),
+        "write_extra": bool(cfg.write_extra),
         "schedule": results["schedule"],
+        "tracking_difference_annualized_bps": summary[
+            "tracking_difference_annualized_bps"
+        ],
+        "tracking_error_annualized_bps": summary["tracking_error_annualized_bps"],
+        "benchmark_summary": summary,
         "output_dir": str(OUTPUT_DIR),
     }
 
